@@ -6,7 +6,6 @@ An implementation of a WebSocket connection.
 """
 from __future__ import annotations
 
-from collections import deque
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -87,9 +86,9 @@ class Connection:
             processed.
         """
         self.client = connection_type is ConnectionType.CLIENT
-        self._events: deque[Event] = deque()
         self._proto = FrameProtocol(self.client, extensions or [])
         self._state = ConnectionState.OPEN
+        self._eof = False
         self.receive_data(trailing_data)
 
     @property
@@ -132,6 +131,13 @@ class Connection:
         :class:`~wsproto.events.CloseConnection` event is yielded from
         :meth:`~wsproto.connection.Connection.events`.
 
+        Passing ``None`` indicates that the underlying transport connection
+        has been lost. Any data that has already been received is still
+        delivered first: :meth:`~wsproto.connection.Connection.events`
+        yields the remaining events before yielding a final
+        :class:`~wsproto.events.CloseConnection` event, so the close is
+        not held up waiting for more data.
+
         :param data: The data received from the remote peer on the network.
         :type data: ``bytes``
         """
@@ -140,9 +146,14 @@ class Connection:
             # frame was received by the endpoint (such as could occur if the
             # underlying transport connection is lost), _The WebSocket
             # Connection Close Code_ is considered to be 1006."
-            self._events.append(CloseConnection(code=CloseReason.ABNORMAL_CLOSURE))
-            self._state = ConnectionState.CLOSED
+            # The CloseConnection event is deferred to events() so that any
+            # data that has already been received is delivered first.
+            self._eof = True
             return
+
+        if self._eof:
+            msg = "Connection already closed."
+            raise LocalProtocolError(msg)
 
         if self.state in (ConnectionState.OPEN, ConnectionState.LOCAL_CLOSING):
             self._proto.receive_bytes(data)
@@ -165,9 +176,6 @@ class Connection:
 
         :returns: generator of :class:`Event <wsproto.events.Event>` subclasses
         """
-        while self._events:
-            yield self._events.popleft()
-
         try:
             for frame in self._proto.received_frames():
                 if frame.opcode is Opcode.PING:
@@ -211,3 +219,16 @@ class Connection:
                     pass  # pragma: no cover
         except ParseFailed as exc:
             yield CloseConnection(code=exc.code, reason=str(exc))
+
+        if self._eof and self._state not in (
+            ConnectionState.REMOTE_CLOSING,
+            ConnectionState.CLOSED,
+        ):
+            # The transport connection was lost and every received frame has
+            # been delivered. The closing handshake did not complete, so the
+            # close code is considered to be 1006 (abnormal closure). In
+            # REMOTE_CLOSING the CloseConnection event has already been
+            # yielded and the reply can still be sent, so nothing more is
+            # generated.
+            self._state = ConnectionState.CLOSED
+            yield CloseConnection(code=CloseReason.ABNORMAL_CLOSURE)

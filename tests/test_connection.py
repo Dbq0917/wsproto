@@ -52,7 +52,21 @@ def test_closure(client_sends: bool, code: CloseReason, reason: str) -> None:
         local = server
         remote = client
 
-    remote.receive_data(local.send(CloseConnection(code=code, reason=reason)))
+    # Data sent before the close frame must be delivered before the
+    # CloseConnection event.
+    messages = ["m1", "m2", "m3"]
+    payload = b""
+    for data in messages:
+        payload += local.send(TextMessage(data=data, message_finished=True))
+    payload += local.send(CloseConnection(code=code, reason=reason))
+    remote.receive_data(payload)
+
+    for data in messages:
+        event = next(remote.events())
+        assert isinstance(event, TextMessage)
+        assert event.data == data
+        assert event.message_finished is True
+
     event = next(remote.events())
     assert isinstance(event, CloseConnection)
     assert event.code is code
@@ -81,6 +95,63 @@ def test_abnormal_closure() -> None:
     assert isinstance(event, CloseConnection)
     assert event.code is CloseReason.ABNORMAL_CLOSURE
     assert client.state is ConnectionState.CLOSED
+
+
+def test_closure_then_connection_drops() -> None:
+    client = Connection(CLIENT)
+    server = Connection(SERVER)
+
+    # The peer sends its final messages immediately followed by a close
+    # frame, and then the underlying transport connection is lost before
+    # the events are retrieved.
+    messages = ["m1", "m2", "m3"]
+    payload = b""
+    for data in messages:
+        payload += client.send(TextMessage(data=data, message_finished=True))
+    payload += client.send(CloseConnection(code=CloseReason.NORMAL_CLOSURE))
+    server.receive_data(payload)
+    server.receive_data(None)
+
+    for data in messages:
+        event = next(server.events())
+        assert isinstance(event, TextMessage)
+        assert event.data == data
+
+    event = next(server.events())
+    assert isinstance(event, CloseConnection)
+    assert event.code is CloseReason.NORMAL_CLOSURE
+    assert server.state is ConnectionState.REMOTE_CLOSING
+
+    # The close reply can still be sent, and no spurious abnormal closure
+    # event is generated afterwards.
+    server.send(event.response())
+    assert server.state is ConnectionState.CLOSED
+    assert list(server.events()) == []
+
+
+def test_connection_drops_with_pending_data() -> None:
+    client = Connection(CLIENT)
+    server = Connection(SERVER)
+
+    # Data that has already been received must be delivered before the
+    # abnormal closure event, without waiting for more data.
+    messages = ["m1", "m2", "m3"]
+    for data in messages:
+        server.receive_data(client.send(TextMessage(data=data, message_finished=True)))
+    server.receive_data(None)
+
+    for data in messages:
+        event = next(server.events())
+        assert isinstance(event, TextMessage)
+        assert event.data == data
+
+    event = next(server.events())
+    assert isinstance(event, CloseConnection)
+    assert event.code is CloseReason.ABNORMAL_CLOSURE
+    assert server.state is ConnectionState.CLOSED
+
+    with pytest.raises(LocalProtocolError):
+        server.receive_data(b"foobar")
 
 
 def test_close_whilst_closing() -> None:

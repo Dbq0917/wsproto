@@ -6,6 +6,11 @@ Release History
 
 - Require ``event_hint`` when constructing ``RemoteProtocolError``.
   This is an API-breaking change.
+- Deliver already received messages before the close event when the
+  connection is closed. Previously, ``receive_data(None)`` queued a
+  ``CloseConnection`` event ahead of any received but not yet retrieved
+  messages, which could drop them for consumers that stop at the close
+  event.
 
 1.3.2 (2025-11-20)
 ------------------
