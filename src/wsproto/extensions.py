@@ -71,9 +71,15 @@ class PerMessageDeflate(Extension):
         client_max_window_bits: int | None = None,
         server_no_context_takeover: bool = False,
         server_max_window_bits: int | None = None,
+        max_decompressed_size: int | None = None,
     ) -> None:
         self.client_no_context_takeover = client_no_context_takeover
         self.server_no_context_takeover = server_no_context_takeover
+        #: Maximum number of bytes a single inbound message may decompress
+        #: to. ``None`` (the default) means no limit. When the limit is
+        #: exceeded decompression stops and the connection is failed with
+        #: ``CloseReason.MESSAGE_TOO_BIG``.
+        self.max_decompressed_size = max_decompressed_size
         self._client_max_window_bits = self.DEFAULT_CLIENT_MAX_WINDOW_BITS
         self._server_max_window_bits = self.DEFAULT_SERVER_MAX_WINDOW_BITS
         if client_max_window_bits is not None:
@@ -89,6 +95,8 @@ class PerMessageDeflate(Extension):
         # frames). Only the first frame in a fragmented message is flagged for
         # compression, so this carries that bit forward.
         self._inbound_compressed: bool | None = None
+        # Decompressed size of the ongoing inbound message so far.
+        self._inbound_decompressed_size = 0
 
         self._enabled = False
 
@@ -226,6 +234,23 @@ class PerMessageDeflate(Extension):
             return data
         assert self._decompressor is not None
 
+        if self.max_decompressed_size is not None:
+            remaining = self.max_decompressed_size - self._inbound_decompressed_size
+            try:
+                # Ask for one byte more than the remaining budget so that
+                # exceeding the limit is detected here, mid-stream, instead
+                # of after the whole payload has been decompressed.
+                result = self._decompressor.decompress(bytes(data), remaining + 1)
+            except zlib.error:
+                return CloseReason.INVALID_FRAME_PAYLOAD_DATA
+            self._inbound_decompressed_size += len(result)
+            if (
+                self._decompressor.unconsumed_tail
+                or self._inbound_decompressed_size > self.max_decompressed_size
+            ):
+                return CloseReason.MESSAGE_TOO_BIG
+            return result
+
         try:
             return self._decompressor.decompress(bytes(data))
         except zlib.error:
@@ -244,11 +269,11 @@ class PerMessageDeflate(Extension):
             return None
         assert self._decompressor is not None
 
-        try:
-            data = self._decompressor.decompress(b"\x00\x00\xff\xff")
-            data += self._decompressor.flush()
-        except zlib.error:
-            return CloseReason.INVALID_FRAME_PAYLOAD_DATA
+        data = self._finish_decompression()
+        if isinstance(data, CloseReason):
+            return data
+
+        self._inbound_decompressed_size = 0
 
         if proto.client:
             no_context_takeover = self.server_no_context_takeover
@@ -260,6 +285,31 @@ class PerMessageDeflate(Extension):
 
         self._inbound_compressed = None
 
+        return data
+
+    def _finish_decompression(self) -> bytes | CloseReason:
+        assert self._decompressor is not None
+
+        if self.max_decompressed_size is None:
+            try:
+                data = self._decompressor.decompress(b"\x00\x00\xff\xff")
+                data += self._decompressor.flush()
+            except zlib.error:
+                return CloseReason.INVALID_FRAME_PAYLOAD_DATA
+            return data
+
+        remaining = self.max_decompressed_size - self._inbound_decompressed_size
+        try:
+            data = self._decompressor.decompress(b"\x00\x00\xff\xff", remaining + 1)
+            if not self._decompressor.unconsumed_tail:
+                data += self._decompressor.flush()
+        except zlib.error:
+            return CloseReason.INVALID_FRAME_PAYLOAD_DATA
+        if self._decompressor.unconsumed_tail:
+            return CloseReason.MESSAGE_TOO_BIG
+        self._inbound_decompressed_size += len(data)
+        if self._inbound_decompressed_size > self.max_decompressed_size:
+            return CloseReason.MESSAGE_TOO_BIG
         return data
 
     def frame_outbound(

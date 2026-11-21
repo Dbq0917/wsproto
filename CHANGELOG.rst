@@ -4,6 +4,12 @@ Release History
 1.4.0 (unreleased)
 ------------------
 
+- Add ``max_decompressed_size`` to ``PerMessageDeflate`` to bound the
+  decompressed size of inbound messages. When the limit is exceeded
+  decompression stops and the connection is failed with
+  ``CloseReason.MESSAGE_TOO_BIG`` (1009), protecting against
+  decompression bombs. The default of ``None`` keeps the previous
+  unlimited behaviour.
 - Require ``event_hint`` when constructing ``RemoteProtocolError``.
   This is an API-breaking change.
 

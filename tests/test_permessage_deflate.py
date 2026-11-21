@@ -378,6 +378,117 @@ class TestPerMessageDeflate:
 
         assert result2 is fp.CloseReason.INVALID_FRAME_PAYLOAD_DATA
 
+    @staticmethod
+    def _compress(payload: bytes) -> bytes:
+        compressor = zlib.compressobj(zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -15)
+        compressed = compressor.compress(payload)
+        compressed += compressor.flush(zlib.Z_SYNC_FLUSH)
+        return compressed[:-4]
+
+    @pytest.mark.parametrize("client", [True, False])
+    def test_inbound_compression_bomb_rejected(self, client: bool) -> None:
+        # A small frame that decompresses to far more than the limit.
+        payload = b"\x00" * (16 * 1024 * 1024)
+        compressed_payload = self._compress(payload)
+        assert len(compressed_payload) < 20 * 1024
+
+        ext = wpext.PerMessageDeflate(max_decompressed_size=1024 * 1024)
+        ext._enabled = True
+        proto = fp.FrameProtocol(client=client, extensions=[ext])
+
+        result = ext.frame_inbound_header(
+            proto,
+            fp.Opcode.BINARY,
+            fp.RsvBits(True, False, False),
+            len(compressed_payload),
+        )
+        assert isinstance(result, fp.RsvBits)
+        assert result.rsv1
+
+        result2 = ext.frame_inbound_payload_data(proto, compressed_payload)
+        if not isinstance(result2, fp.CloseReason):
+            result2 = ext.frame_inbound_complete(proto, True)
+        assert result2 is fp.CloseReason.MESSAGE_TOO_BIG
+
+    @pytest.mark.parametrize("client", [True, False])
+    def test_inbound_compression_bomb_rejected_across_frames(
+        self, client: bool,
+    ) -> None:
+        payload = b"\x00" * (16 * 1024 * 1024)
+        compressed_payload = self._compress(payload)
+        split = 4096
+
+        ext = wpext.PerMessageDeflate(max_decompressed_size=8 * 1024 * 1024)
+        ext._enabled = True
+        proto = fp.FrameProtocol(client=client, extensions=[ext])
+
+        result = ext.frame_inbound_header(
+            proto, fp.Opcode.BINARY, fp.RsvBits(True, False, False), split,
+        )
+        assert isinstance(result, fp.RsvBits)
+        result2 = ext.frame_inbound_payload_data(proto, compressed_payload[:split])
+        assert not isinstance(result2, fp.CloseReason)
+        assert ext.frame_inbound_complete(proto, False) is None
+
+        result3 = ext.frame_inbound_header(
+            proto,
+            fp.Opcode.CONTINUATION,
+            fp.RsvBits(False, False, False),
+            len(compressed_payload) - split,
+        )
+        assert isinstance(result3, fp.RsvBits)
+        result4 = ext.frame_inbound_payload_data(proto, compressed_payload[split:])
+        if not isinstance(result4, fp.CloseReason):
+            result4 = ext.frame_inbound_complete(proto, True)
+        assert result4 is fp.CloseReason.MESSAGE_TOO_BIG
+
+    @pytest.mark.parametrize("client", [True, False])
+    def test_inbound_compressed_message_within_limit(self, client: bool) -> None:
+        payload = b"x" * (512 * 1024)
+        compressed_payload = self._compress(payload)
+
+        ext = wpext.PerMessageDeflate(max_decompressed_size=1024 * 1024)
+        ext._enabled = True
+        proto = fp.FrameProtocol(client=client, extensions=[ext])
+
+        result = ext.frame_inbound_header(
+            proto,
+            fp.Opcode.BINARY,
+            fp.RsvBits(True, False, False),
+            len(compressed_payload),
+        )
+        assert isinstance(result, fp.RsvBits)
+        assert result.rsv1
+
+        data = ext.frame_inbound_payload_data(proto, compressed_payload)
+        assert isinstance(data, bytes)
+        data2 = ext.frame_inbound_complete(proto, True)
+        assert isinstance(data2, bytes)
+        assert data + data2 == payload
+
+    @pytest.mark.parametrize("client", [True, False])
+    def test_inbound_compressed_message_at_exact_limit(self, client: bool) -> None:
+        payload = b"x" * (512 * 1024)
+        compressed_payload = self._compress(payload)
+
+        ext = wpext.PerMessageDeflate(max_decompressed_size=len(payload))
+        ext._enabled = True
+        proto = fp.FrameProtocol(client=client, extensions=[ext])
+
+        result = ext.frame_inbound_header(
+            proto,
+            fp.Opcode.BINARY,
+            fp.RsvBits(True, False, False),
+            len(compressed_payload),
+        )
+        assert isinstance(result, fp.RsvBits)
+
+        data = ext.frame_inbound_payload_data(proto, compressed_payload)
+        assert isinstance(data, bytes)
+        data2 = ext.frame_inbound_complete(proto, True)
+        assert isinstance(data2, bytes)
+        assert data + data2 == payload
+
     @pytest.mark.parametrize(
         "client,no_context_takeover",
         [(True, True), (True, False), (False, True), (False, False)],
