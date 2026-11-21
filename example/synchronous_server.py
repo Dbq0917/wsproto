@@ -83,7 +83,6 @@ def handle_connection(stream: socket.socket) -> None:
                 print(
                     f"Connection closed: code={event.code} reason={event.reason}",
                 )
-                out_data += ws.send(event.response())
                 running = False
             elif isinstance(event, TextMessage):
                 # Reverse text and send it back to wsproto
@@ -99,6 +98,8 @@ def handle_connection(stream: socket.socket) -> None:
                 print(f"Unknown event: {event!r}")
 
         # 4) Send data from wsproto to network
+        # (includes the automatic close-frame reply, if any)
+        out_data += ws.data_to_send()
         print(f"Sending {len(out_data)} bytes")
         stream.send(out_data)
 

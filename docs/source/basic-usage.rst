@@ -170,17 +170,19 @@ WebSockets are closed with a handshake that requires each endpoint to
 send one frame and receive one frame. Sending a
 :class:`CloseConnection <wsproto.events.CloseConnection>` instance
 sets the state to ``LOCAL_CLOSING``. When a close frame is received,
-it yields a ``CloseConnection`` event, sets the state to
-``REMOTE_CLOSING`` **and requires a reply to be sent**. This reply
-should be a ``CloseConnection`` event. To aid with this the
-``CloseConnection`` class has a :meth:`response()
-<wsproto.events.CloseConnection.response>` method to create the
-appropriate reply. For example,
+a ``CloseConnection`` event is yielded, the close-frame reply is generated
+automatically, and the state is set to ``CLOSED``. The queued reply bytes
+can be retrieved with :meth:`data_to_send()
+<wsproto.connection.Connection.data_to_send>` and must be written to the
+network. For example,
 
 .. code-block:: python
 
-    if isinstance(event, CloseConnection):
-        sock.send(ws.send(event.response()))
+    for event in ws.events():
+        if isinstance(event, CloseConnection):
+            print('Connection closed: code={} reason={}'.format(
+                event.code, event.reason))
+    sock.send(ws.data_to_send())
 
 When the reply has been received by the initiator, it will also yield
 a ``CloseConnection`` event.
@@ -189,11 +191,6 @@ Regardless of which endpoint initiates the closing handshake, the server is
 responsible for tearing down the underlying connection. When a
 ``CloseConnection`` event is generated, it should send pending any ``wsproto``
 data and then tear down the underlying connection.
-
-.. note::
-
-    Both client and server connections must remember to reply to
-    ``CloseConnection`` events initiated by the remote party.
 
 Ping Pong
 ---------

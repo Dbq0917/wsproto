@@ -4,6 +4,12 @@ Release History
 1.4.0 (unreleased)
 ------------------
 
+- Automatically send the close-frame reply when a remote close frame is
+  received, and move the connection straight to ``CLOSED`` rather than
+  waiting in ``REMOTE_CLOSING`` for the user to respond. The reply bytes
+  can be retrieved with the new ``Connection.data_to_send()`` method,
+  also exposed on ``WSConnection``. The ``REMOTE_CLOSING`` state has been
+  removed. This is an API-breaking change.
 - Require ``event_hint`` when constructing ``RemoteProtocolError``.
   This is an API-breaking change.
 

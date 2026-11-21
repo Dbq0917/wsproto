@@ -37,8 +37,6 @@ class ConnectionState(Enum):
     CONNECTING = 0
     #: The opening handshake is complete.
     OPEN = 1
-    #: The remote WebSocket has initiated a connection close.
-    REMOTE_CLOSING = 2
     #: The local WebSocket (i.e. this instance) has initiated a connection close.
     LOCAL_CLOSING = 3
     #: The closing handshake has completed.
@@ -88,6 +86,7 @@ class Connection:
         """
         self.client = connection_type is ConnectionType.CLIENT
         self._events: deque[Event] = deque()
+        self._outgoing = b""
         self._proto = FrameProtocol(self.client, extensions or [])
         self._state = ConnectionState.OPEN
         self.receive_data(trailing_data)
@@ -104,20 +103,30 @@ class Connection:
             data += self._proto.ping(event.payload)
         elif isinstance(event, Pong) and self.state == ConnectionState.OPEN:
             data += self._proto.pong(event.payload)
-        elif isinstance(event, CloseConnection) and self.state in {
-            ConnectionState.OPEN,
-            ConnectionState.REMOTE_CLOSING,
-        }:
+        elif isinstance(event, CloseConnection) and self.state is ConnectionState.OPEN:
             data += self._proto.close(event.code, event.reason)
-            if self.state == ConnectionState.REMOTE_CLOSING:
-                self._state = ConnectionState.CLOSED
-            else:
-                self._state = ConnectionState.LOCAL_CLOSING
+            self._state = ConnectionState.LOCAL_CLOSING
         else:
             msg = f"Event {event} cannot be sent in state {self.state}."
             raise LocalProtocolError(
                 msg,
             )
+        return data
+
+    def data_to_send(self) -> bytes:
+        """
+        Return protocol-generated data waiting to be sent to the remote peer.
+
+        When a remote close frame is received, the close-frame reply is
+        generated automatically while
+        :meth:`~wsproto.connection.Connection.events` is consumed. Call this
+        method to retrieve those bytes so they can be written to the network.
+        The returned data is removed from the internal buffer.
+
+        :returns bytes: The data to send to the remote peer.
+        """
+        data = self._outgoing
+        self._outgoing = b""
         return data
 
     def receive_data(self, data: bytes | None) -> None:
@@ -127,10 +136,11 @@ class Connection:
         A list of events that the remote peer triggered by sending this data can
         be retrieved with :meth:`~wsproto.connection.Connection.events`.
         Passing bytes here does not itself apply every state transition caused
-        by those events. For example, a remote close frame changes the
-        connection state when its corresponding
-        :class:`~wsproto.events.CloseConnection` event is yielded from
-        :meth:`~wsproto.connection.Connection.events`.
+        by those events. For example, a remote close frame queues the
+        close-frame reply and moves the connection to
+        :attr:`~wsproto.connection.ConnectionState.CLOSED` when its
+        corresponding :class:`~wsproto.events.CloseConnection` event is
+        yielded from :meth:`~wsproto.connection.Connection.events`.
 
         :param data: The data received from the remote peer on the network.
         :type data: ``bytes``
@@ -159,9 +169,11 @@ class Connection:
 
         Iterating this generator can advance the connection state while
         received frames are converted into events. For example, yielding a
-        remote :class:`~wsproto.events.CloseConnection` event moves the
-        connection into
-        :attr:`~wsproto.connection.ConnectionState.REMOTE_CLOSING`.
+        remote :class:`~wsproto.events.CloseConnection` event completes the
+        closing handshake: the close-frame reply is queued (retrieve it with
+        :meth:`~wsproto.connection.Connection.data_to_send`) and the
+        connection moves to
+        :attr:`~wsproto.connection.ConnectionState.CLOSED`.
 
         :returns: generator of :class:`Event <wsproto.events.Event>` subclasses
         """
@@ -188,7 +200,14 @@ class Connection:
                     if self.state is ConnectionState.LOCAL_CLOSING:
                         self._state = ConnectionState.CLOSED
                     else:
-                        self._state = ConnectionState.REMOTE_CLOSING
+                        # "If an endpoint receives a Close frame and did not
+                        # previously send a Close frame, the endpoint MUST
+                        # send a Close frame in response." (RFC 6455, 5.5.1)
+                        # The reply is generated immediately so that the
+                        # connection is not held half-closed waiting for the
+                        # user to send one.
+                        self._outgoing += self._proto.close(code, reason)
+                        self._state = ConnectionState.CLOSED
                     yield CloseConnection(code=code, reason=reason)
 
                 elif frame.opcode is Opcode.TEXT:

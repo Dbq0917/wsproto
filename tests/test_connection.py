@@ -52,26 +52,32 @@ def test_closure(client_sends: bool, code: CloseReason, reason: str) -> None:
         local = server
         remote = client
 
+    # The remote peer's close frame arrives first: the reply is generated
+    # automatically and the closing handshake completes immediately.
     remote.receive_data(local.send(CloseConnection(code=code, reason=reason)))
     event = next(remote.events())
     assert isinstance(event, CloseConnection)
     assert event.code is code
     assert event.reason == reason
 
-    assert remote.state is ConnectionState.REMOTE_CLOSING
+    assert remote.state is ConnectionState.CLOSED
     assert local.state is ConnectionState.LOCAL_CLOSING
 
-    local.receive_data(remote.send(event.response()))
+    reply = remote.data_to_send()
+    assert remote.data_to_send() == b""
+
+    local.receive_data(reply)
     event = next(local.events())
     assert isinstance(event, CloseConnection)
     assert event.code is code
     assert event.reason == reason
 
-    assert remote.state is ConnectionState.CLOSED  # type: ignore[comparison-overlap]
     assert local.state is ConnectionState.CLOSED
 
     with pytest.raises(LocalProtocolError):
         local.receive_data(b"foobar")
+    with pytest.raises(LocalProtocolError):
+        remote.receive_data(b"foobar")
 
 
 def test_abnormal_closure() -> None:

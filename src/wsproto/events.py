@@ -167,11 +167,11 @@ class CloseConnection(Event):
     """
     The end of a Websocket connection, represents a closure frame.
 
-    **wsproto does not automatically send a response to a close event.** To
-    comply with the RFC you MUST send a close event back to the remote WebSocket
-    if you have not already sent one. The :meth:`response` method provides a
-    suitable event for this purpose, and you should check if a response needs
-    to be sent by checking :func:`wsproto.WSConnection.state`.
+    **wsproto automatically sends a response to a close event.** When a remote
+    close frame is received, the close-frame reply is generated immediately
+    and can be retrieved with
+    :meth:`wsproto.connection.Connection.data_to_send`, so there is no need to
+    send a close event back yourself.
 
     Fields:
 
@@ -190,7 +190,7 @@ class CloseConnection(Event):
     reason: str | None = None
 
     def response(self) -> CloseConnection:
-        """Generate an RFC-compliant close frame to send back to the peer."""
+        """Generate a close event matching this event's code and reason."""
         return CloseConnection(code=self.code, reason=self.reason)
 
 

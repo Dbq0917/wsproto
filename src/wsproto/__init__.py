@@ -70,6 +70,20 @@ class WSConnection:
             data += self.connection.send(event)
         return data
 
+    def data_to_send(self) -> bytes:
+        """
+        Return protocol-generated data waiting to be sent to the peer.
+
+        When a remote close frame is received, the close-frame reply is
+        generated automatically. Use this method to retrieve those bytes so
+        they can be written to the network.
+
+        :returns bytes: The data to send to the peer
+        """
+        if self.connection is None:
+            return b""
+        return self.connection.data_to_send()
+
     def receive_data(self, data: bytes | None) -> None:
         """
         Feed network data into the connection instance.
