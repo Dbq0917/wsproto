@@ -4,6 +4,8 @@ Release History
 1.4.0 (unreleased)
 ------------------
 
+- Preserve per-message decompression state when control frames arrive
+  between fragments of a compressed message.
 - Require ``event_hint`` when constructing ``RemoteProtocolError``.
   This is an API-breaking change.
 

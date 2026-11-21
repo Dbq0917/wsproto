@@ -8,6 +8,8 @@ import pytest
 
 from wsproto import extensions as wpext
 from wsproto import frame_protocol as fp
+from wsproto.connection import SERVER, Connection
+from wsproto.events import BytesMessage, Ping, Pong
 
 if TYPE_CHECKING:
     from typing import TypedDict
@@ -299,6 +301,56 @@ class TestPerMessageDeflate:
         data += result5
 
         assert data == payload
+
+    @pytest.mark.parametrize(
+        "control_opcode", [fp.Opcode.PING, fp.Opcode.PONG],
+    )
+    def test_fragmented_message_with_interleaved_control_frame(
+        self, control_opcode: fp.Opcode,
+    ) -> None:
+        payload = bytes(range(256)) * 4096
+        chunk_size = (len(payload) + 199) // 200
+        chunks = [
+            payload[offset : offset + chunk_size]
+            for offset in range(0, len(payload), chunk_size)
+        ]
+        assert len(chunks) == 200
+
+        sender_ext = wpext.PerMessageDeflate()
+        sender_ext.finalize("permessage-deflate")
+        sender = fp.FrameProtocol(client=True, extensions=[sender_ext])
+
+        receiver_ext = wpext.PerMessageDeflate()
+        receiver_ext.finalize("permessage-deflate")
+        receiver = Connection(SERVER, extensions=[receiver_ext])
+
+        wire = bytearray()
+        for index, chunk in enumerate(chunks):
+            if index == len(chunks) // 2:
+                if control_opcode is fp.Opcode.PING:
+                    wire += sender.ping(b"keepalive")
+                else:
+                    wire += sender.pong(b"keepalive")
+            wire += sender.send_data(chunk, fin=index == len(chunks) - 1)
+        wire += sender.send_data(b"second message")
+
+        receiver.receive_data(bytes(wire))
+
+        messages = []
+        controls = []
+        current = bytearray()
+        for event in receiver.events():
+            if isinstance(event, (Ping, Pong)):
+                controls.append(event.payload)
+            else:
+                assert isinstance(event, BytesMessage)
+                current += event.data
+                if event.message_finished:
+                    messages.append(bytes(current))
+                    current.clear()
+
+        assert controls == [b"keepalive"]
+        assert messages == [payload, b"second message"]
 
     @pytest.mark.parametrize("client", [True, False])
     def test_client_decompress_after_uncompressible_frame(self, client: bool) -> None:
